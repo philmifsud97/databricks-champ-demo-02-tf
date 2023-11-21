@@ -1,0 +1,204 @@
+name: CICD
+on:
+  push:
+    paths-ignore:
+      - README.md
+      - LICENSE
+      - images
+      - terraform
+      - azure-pipeline.yml
+      
+env:
+  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+  DATABRICKS_TOKEN:  ${{ secrets.DATABRICKS_TOKEN }}
+  REPO_DIRECTORY: ${{ vars.REPO_DIRECTORY }}
+  CLUSTER_ID: ${{ vars.CLUSTER_ID }}
+  TEST_PIPELINE_ID: 280456420773804 
+  TEST_PIPELINE_NAME: "Demo 02 Tests"
+  DLT_PIPELINE_ID: cccbee24-a93b-4934-b588-751e1eee0981
+  DLT_PIPELINE_NAME: "Demo 02 Integaration Test"
+
+permissions:
+  checks: write
+jobs:
+  OnPush:
+    if: ${{ !(startsWith(github.ref_name, 'releases')) && !(startsWith(github.ref_name, 'tags')) }} 
+    environment: dev
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.8
+  
+    - name: install-databricks-cli
+      uses: microsoft/install-databricks-cli@v1.0.0
+      
+    - name: Update databricks repo
+      run: |
+        databricks repos update --path $REPO_DIRECTORY --branch "${{github.ref_name}}"
+
+    - name: Install Databricks cli v2
+      run: |
+        pip uninstall databricks-cli -y
+        sleep 10
+        curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh  
+         
+    - name: Run Unit Tests
+      run: |
+        databricks -v
+        DLT_START=$SECONDS
+        DLT_START_ISO=$(date --iso-8601=seconds)
+        JOB_ID=$(databricks jobs run-now ${{ env.TEST_PIPELINE_ID }} --no-wait | jq .run_id)
+        sleep 15
+        while true; do
+          DLT_STATUS=$(databricks jobs get-run $JOB_ID |jq -r .state.life_cycle_state)
+          DLT_RESULT=$(databricks jobs get-run $JOB_ID |jq -r .state.result_state)
+          if [ "$DLT_STATUS" = "CANCELED" -o "$DLT_STATUS" = "SKIPPED" -o "$DLT_STATUS" = "FAILED" -o "$DLT_STATUS" = "TERMINATED" ]; then
+            echo "Exiting loop with status '$DLT_STATUS' with results '$DLT_RESULT'"
+            break
+          fi
+          echo "DLT pipeline status is '$DLT_STATUS'. Waiting..."
+          sleep 15
+        done
+        DLT_FINISH=$SECONDS
+        DLT_ERRORS=$(( "$DLT_RESULT" = "FAILED" ? 1 : 0 ))
+        DLT_SKIPPED=$(( "$DLT_RESULT" = "CANCELED" ? 1 : 0 ))
+        echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"DLT Integration test\" tests=\"1\" skipped=\"$DLT_SKIPPED\" errors=\"$DLT_ERRORS\" failures=\"$DLT_ERRORS\" time=\"$((DLT_FINISH-DLT_START))\" timestamp=\"${DLT_START_ISO}\">" > test-dlt.xml
+        echo "<testcase classname=\"DLTIntegration\" name=\"${{ env.TEST_PIPELINE_NAME }}\" time=\"$((DLT_FINISH-DLT_START))\">" >> test-dlt.xml
+        if [ "$DLT_RESULT" = "FAILED" ]; then
+          echo "<failure message=\"DLT test failure\">Pipeline update with ID ${JOB_ID} has failed</failure>" >> test-dlt.xml
+        elif [ "$DLT_RESULT" = "SKIPPED" ]; then
+          echo '<skipped />' >> test-dlt.xml
+        fi
+        echo '</testcase></testsuite></testsuites>' >> test-dlt.xml
+        if [ "$DLT_RESULT" != "SUCCESS" ]; then
+          exit 1
+        fi
+
+    - name: Publish Test Report
+      uses: mikepenz/action-junit-report@v3
+      if: success() || failure() # always run even if the previous step fails
+      with:
+        report_paths: '**/test-*.xml'  
+     
+  OnRelease:
+    if: startsWith(github.ref_name, 'releases')
+    environment: stage
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.8
+
+    - name: install-databricks-cli
+      uses: microsoft/install-databricks-cli@v1.0.0
+      
+    - name: Update databricks repo
+      run: |
+        databricks repos update --path $REPO_DIRECTORY --branch "${{github.ref_name}}"
+
+    - name: Install Databricks cli v2
+      run: |
+        pip uninstall databricks-cli -y
+        sleep 10
+        curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh  
+         
+    - name: Run Unit Tests
+      run: |
+        databricks -v
+        DLT_START=$SECONDS
+        DLT_START_ISO=$(date --iso-8601=seconds)
+        JOB_ID=$(databricks jobs run-now ${{ env.TEST_PIPELINE_ID }} --no-wait | jq .run_id)
+        sleep 15
+        while true; do
+          DLT_STATUS=$(databricks jobs get-run $JOB_ID |jq -r .state.life_cycle_state)
+          DLT_RESULT=$(databricks jobs get-run $JOB_ID |jq -r .state.result_state)
+          if [ "$DLT_STATUS" = "CANCELED" -o "$DLT_STATUS" = "SKIPPED" -o "$DLT_STATUS" = "FAILED" -o "$DLT_STATUS" = "TERMINATED" ]; then
+            echo "Exiting loop with status '$DLT_STATUS' with results '$DLT_RESULT'"
+            break
+          fi
+          echo "DLT pipeline status is '$DLT_STATUS'. Waiting..."
+          sleep 15
+        done
+        DLT_FINISH=$SECONDS
+        DLT_ERRORS=$(( "$DLT_RESULT" = "FAILED" ? 1 : 0 ))
+        DLT_SKIPPED=$(( "$DLT_RESULT" = "CANCELED" ? 1 : 0 ))
+        echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"DLT Integration test\" tests=\"1\" skipped=\"$DLT_SKIPPED\" errors=\"$DLT_ERRORS\" failures=\"$DLT_ERRORS\" time=\"$((DLT_FINISH-DLT_START))\" timestamp=\"${DLT_START_ISO}\">" > test-dlt.xml
+        echo "<testcase classname=\"DLTIntegration\" name=\"${{ env.TEST_PIPELINE_NAME }}\" time=\"$((DLT_FINISH-DLT_START))\">" >> test-dlt.xml
+        if [ "$DLT_RESULT" = "FAILED" ]; then
+          echo "<failure message=\"DLT test failure\">Pipeline update with ID ${JOB_ID} has failed</failure>" >> test-dlt.xml
+        elif [ "$DLT_RESULT" = "SKIPPED" ]; then
+          echo '<skipped />' >> test-dlt.xml
+        fi
+        echo '</testcase></testsuite></testsuites>' >> test-dlt.xml
+        if [ "$DLT_RESULT" != "SUCCESS" ]; then
+          exit 1
+        fi
+
+    - name: Run Integration Test
+      run: |
+        databricks -v
+        DLT_START=$SECONDS
+        DLT_START_ISO=$(date --iso-8601=seconds)
+        JOB_ID=$(databricks pipelines start-update ${{ env.DLT_PIPELINE_ID }} | jq -r .update_id)
+        sleep 15
+        while true; do
+          DLT_STATUS=$(databricks pipelines get-update ${{ env.DLT_PIPELINE_ID }} $JOB_ID | jq -r .update.state)
+          if [ "$DLT_STATUS" = "COMPLETED" -o "$DLT_STATUS" = "FAILED" ]; then
+            echo "Exiting loop with status '$DLT_STATUS'"
+            break
+          fi
+          echo "DLT pipeline status is '$DLT_STATUS'. Waiting..."
+          sleep 15
+        done
+        DLT_FINISH=$SECONDS
+        DLT_ERRORS=$(( "$DLT_STATUS" = "FAILED" ? 1 : 0 ))
+        DLT_SKIPPED=$(( "$DLT_STATUS" = "CANCELED" ? 1 : 0 ))
+        echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites><testsuite name=\"DLT Integration test\" tests=\"1\" skipped=\"$DLT_SKIPPED\" errors=\"$DLT_ERRORS\" failures=\"$DLT_ERRORS\" time=\"$((DLT_FINISH-DLT_START))\" timestamp=\"${DLT_START_ISO}\">" > test-dlt.xml
+        echo "<testcase classname=\"DLTIntegration\" name=\"${{ env.DLT_PIPELINE_NAME }}\" time=\"$((DLT_FINISH-DLT_START))\">" >> test-dlt.xml
+        if [ "$DLT_STATUS" = "FAILED" ]; then
+          echo "<failure message=\"DLT test failure\">Pipeline update with ID ${JOB_ID} has failed</failure>" >> test-dlt.xml
+        elif [ "$DLT_STATUS" = "SKIPPED" ]; then
+          echo '<skipped />' >> test-dlt.xml
+        fi
+        echo '</testcase></testsuite></testsuites>' >> test-dlt.xml
+        if [ "$DLT_STATUS" != "COMPLETED" ]; then
+          exit 1
+        fi
+
+    - name: Publish Test Report
+      uses: mikepenz/action-junit-report@v3
+      if: success() || failure() # always run even if the previous step fails
+      with:
+        report_paths: '**/test-*.xml'
+        
+  DeployProduction:
+    environment: prod
+    runs-on: ubuntu-latest
+    needs: [OnRelease]
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.8
+
+    - name: Install libraries
+      run: |
+        pip install --upgrade pip nutter
+    - name: install-databricks-cli
+      uses: microsoft/install-databricks-cli@v1.0.0
+
+    - name: Update databricks repo
+      run: |
+        databricks repos update --path $REPO_DIRECTORY --branch "${{github.ref_name}}"
